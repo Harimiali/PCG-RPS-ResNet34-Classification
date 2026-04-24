@@ -216,3 +216,24 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+# =========================================
+# Project-specific (PCG RPS ResNet)
+# =========================================
+
+# Dataset (DO NOT upload)
+data/
+
+# Training outputs (models, logs, evaluation)
+results/
+
+# TensorFlow / Keras models
+*.keras
+*.h5
+*.ckpt
+
+# Optional: keep example results if you want demo
+# !results/example_output/
+
+# Mac / Windows extra safety
+.DS_Store
+Thumbs.db
