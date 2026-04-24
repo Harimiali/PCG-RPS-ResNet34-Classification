@@ -1,7 +1,7 @@
 """
 tensor_generation.py
 
-Utilities for converting 2D RPS/PCA data into CNN-ready tensors.
+Utilities for converting RPS/PCA point data into CNN-ready tensors.
 
 Includes:
 - 2D histogram tensor generation
@@ -9,14 +9,15 @@ Includes:
 - Sobel gradient channel
 - Laplacian channel
 - RGB tensor construction
+- Grayscale ablation mode compatible with ResNet input
 
 --------------------------------------------------
-INSTALLATION (run in terminal):
+INSTALLATION:
 
 pip install numpy opencv-python
 
 --------------------------------------------------
-USAGE EXAMPLE:
+NORMAL USE:
 
 from src.tensor_generation import TensorConfig, tensor_generation_pipeline
 
@@ -29,7 +30,10 @@ config = TensorConfig(
 
 result = tensor_generation_pipeline(pca_data, config)
 
-rgb_tensor = result["final_tensor"]
+final_tensor = result["final_tensor"]
+
+Output shape:
+    224 × 224 × 3
 
 --------------------------------------------------
 """
@@ -53,7 +57,7 @@ class TensorConfig:
     normalize_tensor: bool = True
     log_transform: bool = True
 
-    # RGB control
+    # RGB / ablation control
     use_rgb: bool = True
     use_sobel: bool = True
     use_laplacian: bool = True
@@ -62,22 +66,15 @@ class TensorConfig:
     output_dtype: str = "float32"
 
 
-def validate_2d_data(data: np.ndarray) -> np.ndarray:
+def validate_point_data(data: np.ndarray) -> np.ndarray:
     """
-    Validate input 2D data.
+    Validate input point data.
 
-    Expected shape:
-        (N, 2)
+    Expected input:
+        (N, 2) or (N, D)
 
-    Parameters
-    ----------
-    data : np.ndarray
-        2D RPS/PCA data.
-
-    Returns
-    -------
-    np.ndarray
-        Validated float32 data.
+    If more than 2 columns are provided, only the first two columns are used.
+    This keeps the system compatible when PCA is disabled.
     """
 
     if data is None:
@@ -88,21 +85,24 @@ def validate_2d_data(data: np.ndarray) -> np.ndarray:
     if data.ndim != 2:
         raise ValueError("Input data must be 2D.")
 
-    if data.shape[1] != 2:
-        raise ValueError("Input data must have exactly 2 columns.")
-
     if data.shape[0] == 0:
         raise ValueError("Input data is empty.")
+
+    if data.shape[1] < 2:
+        raise ValueError(
+            "Input data must have at least 2 columns. "
+            "For CNN tensor generation, 2D coordinates are required."
+        )
 
     if np.any(np.isnan(data)) or np.any(np.isinf(data)):
         raise ValueError("Input data contains NaN or infinite values.")
 
-    return data
+    return data[:, :2]
 
 
 def normalize_array(array: np.ndarray) -> np.ndarray:
     """
-    Normalize an array to the range [0, 1].
+    Normalize array to range [0, 1].
     """
 
     array = np.asarray(array, dtype=np.float32)
@@ -113,7 +113,9 @@ def normalize_array(array: np.ndarray) -> np.ndarray:
     if max_value - min_value < 1e-8:
         return np.zeros_like(array, dtype=np.float32)
 
-    return ((array - min_value) / (max_value - min_value)).astype(np.float32)
+    normalized = (array - min_value) / (max_value - min_value)
+
+    return normalized.astype(np.float32)
 
 
 def create_2d_tensor(
@@ -127,22 +129,22 @@ def create_2d_tensor(
 
     Parameters
     ----------
-    data : np.ndarray
-        Input 2D points with shape (N, 2).
-    image_size : int
-        Output tensor size. Default is 224.
-    normalize : bool
-        Whether to normalize output to [0, 1].
-    log_transform : bool
-        Whether to apply log(1 + x) to reduce extreme values.
+    data:
+        Point data with shape (N, 2) or (N, D).
+    image_size:
+        Output tensor size.
+    normalize:
+        Normalize tensor to [0, 1].
+    log_transform:
+        Apply log(1 + x) to reduce dominance of high-density cells.
 
     Returns
     -------
-    np.ndarray
+    tensor:
         2D tensor with shape (image_size, image_size).
     """
 
-    data = validate_2d_data(data)
+    data = validate_point_data(data)
 
     if image_size <= 0:
         raise ValueError("image_size must be positive.")
@@ -158,7 +160,7 @@ def create_2d_tensor(
 
     tensor = tensor.astype(np.float32)
 
-    # Transpose to match image coordinate convention
+    # Match image coordinate convention
     tensor = tensor.T
 
     if log_transform:
@@ -172,13 +174,29 @@ def create_2d_tensor(
 
 def create_sobel_channel(tensor: np.ndarray) -> np.ndarray:
     """
-    Create Sobel gradient magnitude channel from a 2D tensor.
+    Create Sobel gradient magnitude channel.
     """
 
     tensor = np.asarray(tensor, dtype=np.float32)
 
-    sobel_x = cv2.Sobel(tensor, cv2.CV_32F, 1, 0, ksize=3)
-    sobel_y = cv2.Sobel(tensor, cv2.CV_32F, 0, 1, ksize=3)
+    if tensor.ndim != 2:
+        raise ValueError("Sobel input tensor must be 2D.")
+
+    sobel_x = cv2.Sobel(
+        tensor,
+        cv2.CV_32F,
+        dx=1,
+        dy=0,
+        ksize=3
+    )
+
+    sobel_y = cv2.Sobel(
+        tensor,
+        cv2.CV_32F,
+        dx=0,
+        dy=1,
+        ksize=3
+    )
 
     sobel_magnitude = np.sqrt(sobel_x ** 2 + sobel_y ** 2)
 
@@ -187,12 +205,19 @@ def create_sobel_channel(tensor: np.ndarray) -> np.ndarray:
 
 def create_laplacian_channel(tensor: np.ndarray) -> np.ndarray:
     """
-    Create Laplacian channel from a 2D tensor.
+    Create Laplacian channel.
     """
 
     tensor = np.asarray(tensor, dtype=np.float32)
 
-    laplacian = cv2.Laplacian(tensor, cv2.CV_32F, ksize=3)
+    if tensor.ndim != 2:
+        raise ValueError("Laplacian input tensor must be 2D.")
+
+    laplacian = cv2.Laplacian(
+        tensor,
+        cv2.CV_32F,
+        ksize=3
+    )
 
     laplacian = np.abs(laplacian)
 
@@ -205,28 +230,23 @@ def create_rgb_tensor(
     use_laplacian: bool = True
 ) -> np.ndarray:
     """
-    Create RGB tensor from the 2D tensor.
+    Create RGB tensor.
 
-    Channel 1: original 2D tensor
-    Channel 2: Sobel gradient
-    Channel 3: Laplacian
+    Channel 1:
+        Original 2D tensor
 
-    If Sobel or Laplacian is disabled, the original tensor is repeated
-    in that channel to keep output shape compatible with CNN input.
+    Channel 2:
+        Sobel gradient channel if enabled;
+        otherwise original tensor
 
-    Parameters
-    ----------
-    tensor : np.ndarray
-        Input 2D tensor.
-    use_sobel : bool
-        Whether to use Sobel as second channel.
-    use_laplacian : bool
-        Whether to use Laplacian as third channel.
+    Channel 3:
+        Laplacian channel if enabled;
+        otherwise original tensor
 
     Returns
     -------
-    np.ndarray
-        RGB tensor with shape (H, W, 3).
+    rgb_tensor:
+        Tensor with shape (H, W, 3).
     """
 
     tensor = np.asarray(tensor, dtype=np.float32)
@@ -237,21 +257,74 @@ def create_rgb_tensor(
     base_channel = normalize_array(tensor)
 
     if use_sobel:
-        sobel_channel = create_sobel_channel(base_channel)
+        second_channel = create_sobel_channel(base_channel)
     else:
-        sobel_channel = base_channel.copy()
+        second_channel = base_channel.copy()
 
     if use_laplacian:
-        laplacian_channel = create_laplacian_channel(base_channel)
+        third_channel = create_laplacian_channel(base_channel)
     else:
-        laplacian_channel = base_channel.copy()
+        third_channel = base_channel.copy()
 
     rgb_tensor = np.stack(
-        [base_channel, sobel_channel, laplacian_channel],
+        [
+            base_channel,
+            second_channel,
+            third_channel
+        ],
         axis=-1
     )
 
     return rgb_tensor.astype(np.float32)
+
+
+def create_grayscale_compatible_tensor(tensor: np.ndarray) -> np.ndarray:
+    """
+    Create grayscale ablation tensor while keeping ResNet-compatible shape.
+
+    Instead of returning:
+        H × W × 1
+
+    This returns:
+        H × W × 3
+
+    by repeating the same grayscale channel three times.
+    """
+
+    tensor = np.asarray(tensor, dtype=np.float32)
+
+    if tensor.ndim != 2:
+        raise ValueError("Input tensor must be 2D.")
+
+    base_channel = normalize_array(tensor)
+
+    grayscale_tensor = np.stack(
+        [
+            base_channel,
+            base_channel,
+            base_channel
+        ],
+        axis=-1
+    )
+
+    return grayscale_tensor.astype(np.float32)
+
+
+def convert_dtype(
+    tensor: np.ndarray,
+    output_dtype: str = "float32"
+) -> np.ndarray:
+    """
+    Convert output tensor dtype.
+    """
+
+    if output_dtype == "float32":
+        return tensor.astype(np.float32)
+
+    if output_dtype == "uint8":
+        return (normalize_array(tensor) * 255).astype(np.uint8)
+
+    raise ValueError("output_dtype must be 'float32' or 'uint8'.")
 
 
 def tensor_generation_pipeline(
@@ -261,17 +334,11 @@ def tensor_generation_pipeline(
     """
     Complete configurable tensor generation pipeline.
 
-    Parameters
-    ----------
-    data : np.ndarray
-        2D PCA/RPS data with shape (N, 2).
-    config : TensorConfig
-        Tensor generation configuration.
+    This function always returns a CNN-compatible tensor:
 
-    Returns
-    -------
-    dict
-        Dictionary containing generated tensors and metadata.
+        image_size × image_size × 3
+
+    This is important because ResNet-34 expects 3 input channels.
     """
 
     if config is None:
@@ -291,14 +358,24 @@ def tensor_generation_pipeline(
             use_laplacian=config.use_laplacian
         )
     else:
-        final_tensor = tensor_2d[..., np.newaxis]
+        final_tensor = create_grayscale_compatible_tensor(tensor_2d)
 
-    if config.output_dtype == "float32":
-        final_tensor = final_tensor.astype(np.float32)
-    elif config.output_dtype == "uint8":
-        final_tensor = (normalize_array(final_tensor) * 255).astype(np.uint8)
-    else:
-        raise ValueError("output_dtype must be 'float32' or 'uint8'.")
+    final_tensor = convert_dtype(
+        tensor=final_tensor,
+        output_dtype=config.output_dtype
+    )
+
+    expected_shape = (
+        config.image_size,
+        config.image_size,
+        3
+    )
+
+    if final_tensor.shape != expected_shape:
+        raise ValueError(
+            f"Final tensor shape is {final_tensor.shape}, "
+            f"but expected {expected_shape}."
+        )
 
     output = {
         "tensor_2d": tensor_2d,
@@ -320,13 +397,13 @@ def tensor_generation_pipeline(
 
 
 # --------------------------------------------------
-# SIMPLE TEST (optional)
+# SIMPLE TEST
 # --------------------------------------------------
 if __name__ == "__main__":
 
-    # Example synthetic 2D RPS/PCA data
     np.random.seed(42)
 
+    # Example 2D data, like PCA output
     x = np.random.randn(5000)
     y = 0.5 * x + 0.2 * np.random.randn(5000)
 
@@ -347,3 +424,13 @@ if __name__ == "__main__":
     print("2D tensor shape:", result["tensor_2d"].shape)
     print("Final tensor shape:", result["final_tensor"].shape)
     print("Final tensor dtype:", result["final_tensor"].dtype)
+
+    # Test ablation mode: no RGB
+    config_no_rgb = TensorConfig(
+        image_size=224,
+        use_rgb=False
+    )
+
+    result_no_rgb = tensor_generation_pipeline(data_2d, config_no_rgb)
+
+    print("No-RGB final tensor shape:", result_no_rgb["final_tensor"].shape)
